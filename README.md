@@ -298,8 +298,9 @@ spring.kafka.consumer.group-id=springboot-groupid
 spring.kafka.consumer.auto.offset-reset=earliest
 spring.kafka.consumer.enable-auto-commit=true
 
-spring.kafka.consumer.key-deserializer=org.apache.kafka.common.serialization.StringDeserializer
-spring.kafka.consumer.value-deserializer=org.apache.kafka.common.serialization.IntegerDeserializer
+spring.kafka.consumer.key-deserializer=org.apache.kafka.common.serialization.IntegerDeserializer
+spring.kafka.consumer.value-deserializer=org.apache.kafka.common.serialization.StringDeserializer
+
 ```
 
 生产者
@@ -334,3 +335,119 @@ public class PopKafkaConsumer {
 }
 ```
 
+```java
+@SpringBootApplication
+public class KafkapracticeApplication {
+
+    public static void main(String[] args) throws InterruptedException {
+//        SpringApplication.run(KafkapracticeApplication.class, args);
+        ConfigurableApplicationContext context
+                 = SpringApplication.run(KafkapracticeApplication.class, args);
+        PopKafkaProducer kp = context.getBean(PopKafkaProducer.class);
+        for (int i = 0; i < 10; i++) {
+            kp.send();
+            TimeUnit.SECONDS.sleep(2);
+        }
+
+    }
+
+}
+```
+
+![1566231190865](./img/1566231190865.png)
+
+### Kafka中的分区做法
+
+kafka可以支撑千亿级别数据量的topic，对于我们而言，如果一个topic真的有千亿的数据，查询效率也不会高到哪里去，数据库中我们可以用分库分表的方式来处理，当一张表到达百万级别的时候，就会出现瓶颈，所以我们会用时间算法或者hash算法来规定具体落到哪个库或者表中。
+
+kafka中，提供了一种分片的方式，partition
+
+我们可以在命令行加入、
+
+```
+[root@localhost bin]# sh kafka-topics.sh  --create --zookeeper 192.168.0.102:2182 --replication-factor 1 --partitions 3 --topic test_partitions
+```
+
+区别在于partitions中加入了3，表示会为这个topic创建三个分区。
+
+而在java代码中，我们可以有自己定义的算法来规定具体会落到哪个分区中。
+
+```java
+public class MyPartition implements Partitioner {
+
+    @Override
+    public int partition(String s, Object o, byte[] bytes, Object o1, byte[] bytes1, Cluster cluster) {
+        /**
+         * 这个方法为核心方法，返回值代表会落到具体哪个分区
+         * 如果是0 就是 1号分区，依次类推
+         */
+        System.out.println("enter");
+        //获得这个topic的所有分区
+        List<PartitionInfo> list=cluster.partitionsForTopic(s);
+        int len = list.size();
+        if(o==null){//我们在发送消息的时候会指定key和value，key如果指定了的话
+            //kafka会根据key，计算，如果没有，也会有默认的计算方式
+            Random random = new Random();
+            return random.nextInt(len);
+        }
+        return Math.abs(o.hashCode())%len;
+    }
+
+    @Override
+    public void close() {
+
+    }
+
+    @Override
+    public void configure(Map<String, ?> map) {
+
+    }
+}
+```
+
+接着在生产者放，加入相关配置。
+
+```java
+
+        //集群条件用逗号隔开，和原本的server.properties的提示一样
+        properties.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG,
+                "192.168.0.102:9092");
+        properties.put(ProducerConfig.CLIENT_ID_CONFIG,"pop-producer");
+
+        //自定义的分区算法方式
+   properties.put(ProducerConfig.PARTITIONER_CLASS_CONFIG,"com.pop.kafka.kafkapractice.spring.MyPartition");
+```
+
+![1566233698630](./img/1566233698630.png)
+
+之前我们说过topic中的内容，可以做分区，而我们知道处于同一个groupid的consumer无法享用所有的消息队列的，除非你有富裕的topic分发给你消费。
+
+例如，我们之前创建了含有三个分区的test_partitions，那么意味着
+
+![1566235407742](./img/1566235407742.png)
+
+无论是集群环境还是单机环境下，都可以长成这样。
+
+这里有三个分区，然后我们来讨论一下两个极端的场景。三个分区，一个消费者
+
+![1566235541797](./img/1566235541797.png)
+
+他会去消费三个分区的全部数据，然后就是三个消费者。
+
+![1566235594462](./img/1566235594462.png)
+
+我们可以简单的认为他是固定好了，表示消费者1号就是消费分区0号的，这样很均匀的分配的，kafka里也是如此这般实现的。
+
+那么如果是两个消费者的情况，那么意味着有一个消费者需要消费两个分区的内容。
+
+![1566235692910](./img/1566235692910.png)
+
+所以，我们可以联想到，如果超过了分区数量的消费者来了，例如是4个消费者，那么第四个消费者相比就没有东西可以消费，因为消息已经被前三个消费者消费完了，所以第四个消费为空闲。
+
+![1566235797365](./img/1566235797365.png)
+
+因此，如果你的消费者数量太多了，也是浪费，因为并没有多余的消息队列提供给你消费了。
+
+需要注意的是，这里如果有新的消费者连接或者挂掉，都会重新负载，他们的请求将会发给以一个叫做coordinor的对象，他知道现在有多少topic还有该topic有多少分区。
+
+不过这里讨论的情况是处于同一goupid的情况下。

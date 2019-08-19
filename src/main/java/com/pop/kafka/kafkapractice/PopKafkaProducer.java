@@ -26,10 +26,15 @@ public class PopKafkaProducer extends Thread{
                 "192.168.0.102:9092");
         properties.put(ProducerConfig.CLIENT_ID_CONFIG,"pop-producer");
 
+        //自定义的分区算法方式
+        properties.put(ProducerConfig.PARTITIONER_CLASS_CONFIG,"com.pop.kafka.kafkapractice.spring.MyPartition");
+
         //批量发送
 //        properties.put(ProducerConfig.BATCH_SIZE_CONFIG,"");
         //如果不可达会如何 间隔时间
 //        properties.put(ProducerConfig.LINGER_MS_CONFIG,"");
+
+
 
         //申明序列化的方式， 分别是key和value
         properties.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, IntegerSerializer.class.getName());
