@@ -451,3 +451,76 @@ public class MyPartition implements Partitioner {
 需要注意的是，这里如果有新的消费者连接或者挂掉，都会重新负载，他们的请求将会发给以一个叫做coordinor的对象，他知道现在有多少topic还有该topic有多少分区。
 
 不过这里讨论的情况是处于同一goupid的情况下。
+
+
+
+### Kafka的实现原理
+
+Rebalance
+
+* 当分区数发生变化
+* 消费者数量发生变化
+
+#### 策略
+
+* Range
+
+  * test_topic 假设现在有是个分区，三个消费者
+  * 分区为 0，1，2，3，4，5，6，7，8，9，消费者为 c1,c2,c3
+  * 在这个算法中存在两个变量
+    * n = 分区数量/消费者数量=10/3=3
+    * m=分区数量%消费者数量=10%3=1
+  * 这个算法就是，前m个消费者将会分配n+1个分区数量
+  * 所以套入公式我们知道 c1 将会消费 0 1 2 3 四个分区，剩下的将会各消费3个
+  * 这个做法缺点就是一定会有一个节点会多消费一个分区。
+
+* RoundRobin（轮询）、
+
+  * 轮询也许会把分区hash值计算出来。
+  * 轮询的将会把所有的分区`循环`到各个消费者的身上
+  * 还是三个消费者 c1 c2 c3，还是十个分区
+  * c1  0  3  6 9
+  * c2  1  4  7
+  * c3  2  5   8
+
+* Stricky（ 连制）
+
+  * 尽可能均匀
+
+  * 重新负载后，分区的分配尽可能和上一次分配保持一致
+
+  * 这次是三个消费者，然后四个topic（t1,t2,t3,t4），每个topic有两个分区(p0,p1)
+
+  * 如果是轮询的方式
+
+    * c1 t0p0  t1p1  t3p0  
+    * c2 t0p1  t2p0  t3p1  
+    * c3 t1p0  t2p1 
+
+  * 那么假设，现在c2消费者崩溃了，需要做重新的rebalance，轮询的方式，将会完完全全的重新分配，也就是说。
+
+  * c1 t0p0  t1p1 
+
+  * c3  t0p1  t1p2 ...
+
+  * 但如果是stricky的话，会尽可能的保持和之前一样。  
+
+  * c1 t0p0  t1p1  t3p0  t2p0
+
+  * c3 t1p0  t2p1  t3p2  t3p1 
+
+    
+
+```java
+public static final String PARTITION_ASSIGNMENT_STRATEGY_CONFIG = "partition.assignment.strategy";
+//这个配置位于消费者中 ConsumerConfig
+//对应的值有以上三种
+```
+
+消费端发起连接的时候，将会把自己的rebalance策略发送给kafka的一个中间人，他会裁决策略并最终给你哪个分区的给你消费。
+
+### Coordinator
+
+now-lastCaughtUpTimeMs>relica.lag.time.max.ms
+
+提出ISR队列，如果下次小于阈值，将会重新加入。
