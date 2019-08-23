@@ -720,14 +720,42 @@ ISR表示目前“可用且消息量与leader相差不多的副本集合，这�
 可用和相差不多这两个词呢？具体来说，ISR集合中的副本必须满足两个条件
 1. 副本所在节点必须维持着与zookeeper的连接
 2. 副本最后一条消息的offset与leader副本的最后一条消息的offset之间的差值不能超过指定的阈值
-  (replica.lag.time.max.ms) replica.lag.time.max.ms：如果该follower在此时间间隔内一直没有追
-  上过leader的所有消息，则该follower就会被剔除isr列表
+    (replica.lag.time.max.ms) replica.lag.time.max.ms：如果该follower在此时间间隔内一直没有追
+    上过leader的所有消息，则该follower就会被剔除isr列表
 3. ISR数据保存在Zookeeper的 /brokers/topics/partitions//state
-  节点中
-  follower副本把leader副本LEO之前的日志全部同步完成时，则认为follower副本已经追赶上了leader
-  副本，这个时候会更新这个副本的lastCaughtUpTimeMs标识，kafk副本管理器会启动一个副本过期检
-  查的定时任务，这个任务会定期检查当前时间与副本的lastCaughtUpTimeMs的差值是否大于参数
-  replica.lag.time.max.ms 的值，如果大于，则会把这个副本踢出ISR集合
+    节点中
+    follower副本把leader副本LEO之前的日志全部同步完成时，则认为follower副本已经追赶上了leader
+    副本，这个时候会更新这个副本的lastCaughtUpTimeMs标识，kafk副本管理器会启动一个副本过期检
+    查的定时任务，这个任务会定期检查当前时间与副本的lastCaughtUpTimeMs的差值是否大于参数
+    replica.lag.time.max.ms 的值，如果大于，则会把这个副本踢出ISR集合
 
 ![1566492542708](./img/1566492542708.png)
 
+说一个极端的情况，即所有的Replica（副本）都不工作的情况，也就是，在ISR中，只有有一个follwer副本的时候，Kafka可以保证已经commit的数据不丢失，但是如果现在全部的Replica都宕机的情况下怎么办呢
+
+，这样就无法保证数据不丢失了。
+
+* 等待ISR中的任一Replica“活过来”，并选择他为leader
+* 选择第一个“活”过来的Replica（不一定是ISR中的）作为Leader
+
+这就需要在可用性和一致性当中作出一个简单的折衷。
+如果一定要等待ISR中的Replica“活”过来，那不可用的时间就可能会相对较长。而且如果ISR中的所有
+Replica都无法“活”过来了，或者数据都丢失了，这个Partition将永远不可用。
+选择第一个“活”过来的Replica作为Leader，而这个Replica不是ISR中的Replica，那即使它并不保证已
+经包含了所有已commit的消息，它也会成为Leader而作为consumer的数据源（前文有说明，所有读
+写都由Leader完成）。在我们课堂讲的版本中，使用的是第一种策略。
+
+
+
+#### 副本数据同步原理
+
+![1566586617576](C:\Users\99405\AppData\Roaming\Typora\typora-user-images\1566586617576.png)
+
+标记为红色为Leader副本，其它为Follwer副本。
+
+当Producer在发布某个消息到某个Partition的时候
+
+* 通过zk找到该partition的Leader， get/brokers/topics//partitions/2/state，无论他的副本有多少个，都会生产者都会将消息发送给分区的Leader
+* Leader收到消息后，将该消息写入本地log，每个Follwer会从Leader pull 数据，这种方式上，Follwer的数据的存储顺序与Leader保持一致。
+* Follower收到消息，并写入日志Log成功后，向Leader发送ACK
+* 一旦Leader收到了ISR中所有的Replica的ACK后，该消息可以被认为是已经被commit，Leader将会增加HW并且像Producer发送ACK
